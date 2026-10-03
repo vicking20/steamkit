@@ -1,0 +1,11 @@
+{
+  "name": "SteamKit",
+  "author": "Victor Fatunse",
+  "flags": ["root"],
+  "api_version": 1,
+  "publish": {
+    "tags": ["non-steam", "artwork", "mount"],
+    "description": "Auto-mount drives at boot and bulk-add non-Steam games with Proton and artwork, all from Gaming Mode.",
+    "image": ""
+  }
+}

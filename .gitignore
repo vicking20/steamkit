@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.DS_Store
+decky/node_modules/
+decky/dist/
+decky/py_modules/
+decky/out/
