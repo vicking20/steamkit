@@ -1,4 +1,7 @@
+import os
 import unittest
+import urllib.error
+import urllib.request
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -207,3 +210,112 @@ class TestSaves(unittest.TestCase):
             self.assertEqual(f.read_text(), "v1")
             self.assertFalse((saves.saves_dir(parent) / "AppData/Local/D3DSCache").exists())
             self.assertTrue(any("before-restore" in b["name"] for b in saves.list_backups(parent)))
+
+
+class TestLan(unittest.TestCase):
+    def setUp(self):
+        from steamkit import lan, saves
+        self.lan, self.saves = lan, saves
+        self.tmp = TemporaryDirectory()
+        t = Path(self.tmp.name)
+        self.a = lan.Node(t / "a.json", t / "A", http_port=47701, discovery_port=47711)
+        self.b = lan.Node(t / "b.json", t / "B", http_port=47702, discovery_port=47712)
+        for n in (self.a, self.b):
+            n.root.mkdir(parents=True)
+        self.a.start()
+        self.b.start()
+        self.addCleanup(self.a.stop)
+        self.addCleanup(self.b.stop)
+        self.addCleanup(self.tmp.cleanup)
+
+    def put(self, node, rel, text, mtime):
+        p = node.root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+        os.utime(p, (mtime, mtime))
+
+    def pair(self):
+        code = self.a.start_pairing()
+        self.b.pair_with("127.0.0.1", 47701, code)
+        return next(iter(self.b.state.peers))
+
+    def test_pairing_rejects_wrong_code_and_locks_out(self):
+        self.a.start_pairing()
+        for _ in range(self.lan.PAIR_ATTEMPTS):
+            with self.assertRaises(self.lan.PairingError):
+                self.b.pair_with("127.0.0.1", 47701, "000x00")
+        self.assertFalse(self.a.pairing_open())
+        self.assertEqual(self.b.state.peers, {})
+
+    def test_unpaired_requests_are_refused(self):
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            urllib.request.urlopen("http://127.0.0.1:47701/candidates")
+        self.assertEqual(cm.exception.code, 401)
+
+    def test_pair_then_pull_and_newest(self):
+        self.put(self.a, "Documents/My Games/Racer/slot1.sav", "from A", 2000)
+        self.put(self.a, "Documents/My Games/Racer/shared.sav", "A newer", 3000)
+        self.put(self.b, "Documents/My Games/Racer/shared.sav", "B older", 1000)
+        self.put(self.b, "Documents/My Games/Racer/only_b.sav", "B only", 1500)
+        pid = self.pair()
+        self.b.set_tracked(["Documents/My Games/Racer"])
+        r = self.b.sync(pid, "newest")
+        self.assertEqual((r["pulled"], r["pushed"], r["overwritten"]), (2, 1, 1))
+        self.assertIsNotNone(r["backup"])
+        for node in (self.a, self.b):
+            base = node.root / "Documents/My Games/Racer"
+            self.assertEqual((base / "shared.sav").read_text(), "A newer")
+            self.assertEqual((base / "slot1.sav").read_text(), "from A")
+            self.assertEqual((base / "only_b.sav").read_text(), "B only")
+        self.assertEqual(self.b.sync(pid, "newest")["pulled"], 0)
+
+    def test_fresh_device_gets_missing_folders(self):
+        self.put(self.a, "Documents/My Games/NFS/deep/p.sav", "x", 1000)
+        self.assertFalse((self.b.root / "Documents").exists())
+        self.b.sync(self.pair(), "pull", ["Documents/My Games/NFS"])
+        self.assertEqual((self.b.root / "Documents/My Games/NFS/deep/p.sav").read_text(), "x")
+
+    def test_pull_mode_never_pushes_and_push_never_pulls(self):
+        self.put(self.a, "Saved Games/G/a.sav", "a", 1000)
+        self.put(self.b, "Saved Games/G/b.sav", "b", 1000)
+        pid = self.pair()
+        self.b.sync(pid, "pull", ["Saved Games/G"])
+        self.assertTrue((self.b.root / "Saved Games/G/a.sav").exists())
+        self.assertFalse((self.a.root / "Saved Games/G/b.sav").exists())
+
+    def test_equal_mtime_different_content_is_a_conflict(self):
+        self.put(self.a, "Saved Games/G/x.sav", "one", 1000)
+        self.put(self.b, "Saved Games/G/x.sav", "two", 1000)
+        r = self.b.sync(self.pair(), "newest", ["Saved Games/G"])
+        self.assertEqual(r["conflicts"], ["Saved Games/G/x.sav"])
+        self.assertEqual((self.b.root / "Saved Games/G/x.sav").read_text(), "two")
+
+    def test_rejects_paths_outside_save_folders(self):
+        for bad in ["../x", "Documents", "Documents/../../etc", "/etc", "Other/Game", "Documents/a\\b"]:
+            with self.assertRaises(ValueError, msg=bad):
+                self.lan.entry_path(self.a.root, bad)
+
+    def test_symlinks_are_not_followed(self):
+        outside = Path(self.tmp.name) / "secret"
+        outside.mkdir()
+        (outside / "pw.txt").write_text("secret")
+        game = self.a.root / "Documents/G"
+        game.mkdir(parents=True)
+        (game / "link").symlink_to(outside, target_is_directory=True)
+        (game / "real.sav").write_text("x")
+        self.assertEqual(list(self.lan.manifest(self.a.root, "Documents/G")), ["real.sav"])
+
+    def test_candidates_mark_likely_and_skip_junk(self):
+        self.put(self.a, "Documents/My Games/Racer/s.sav", "x", 1000)
+        self.put(self.a, "AppData/Local/Microsoft/junk", "x", 1000)
+        self.put(self.a, "AppData/Roaming/SomeLauncher/cfg", "x", 1000)
+        self.put(self.a, "AppData/LocalLow/Studio/Game/s.dat", "x", 1000)
+        got = {c["entry"]: c["likely"] for c in self.lan.candidates(self.a.root)}
+        self.assertEqual(got, {"Documents/My Games/Racer": True, "AppData/Roaming/SomeLauncher": False,
+                               "AppData/LocalLow/Studio": True})
+
+    def test_discover_finds_running_peer(self):
+        self.b.discovery_port = 47711  # b queries a's discovery port
+        found = self.b.discover(timeout=1, hosts=("127.0.0.1",))
+        self.assertEqual([p["id"] for p in found], [self.a.state.id])
+        self.assertEqual(found[0]["port"], 47701)

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import decky
 
-from steamkit import artwork, compat, mounts, registry, saves, scanner, steam
+from steamkit import artwork, compat, lan, mounts, registry, saves, scanner, steam
 
 SETTINGS = Path(decky.DECKY_PLUGIN_SETTINGS_DIR) / "settings.json"
 registry.set_path(Path(decky.DECKY_PLUGIN_SETTINGS_DIR) / "registry.json")
@@ -93,6 +93,18 @@ def _prefixes() -> list[dict]:
         wine = Path(decky.DECKY_USER_HOME) / ".wine"
         out.append({"label": "Desktop Wine", "data": wine, "drive_c": wine / "drive_c"})
     return out
+
+
+_node: lan.Node | None = None
+
+
+def _lan() -> lan.Node:
+    global _node
+    if _node is None:
+        _node = lan.Node(Path(decky.DECKY_PLUGIN_SETTINGS_DIR) / "lan.json", _saves_parent(), _user_ids(),
+                         busy=lambda: bool(_prefixes_in_use()))
+    _node.set_parent(_saves_parent())
+    return _node
 
 
 def _wait_for_steam_exit(timeout=60) -> None:
@@ -418,12 +430,104 @@ class Plugin:
             decky.logger.exception("move failed")
             return {"ok": False, "error": str(e)}
 
+
+    # --- LAN sync ---------------------------------------------------------------------------
+
+    async def lan_info(self) -> dict:
+        n = _lan()
+        s = _settings()
+        return {"enabled": bool(s.get("lan_sync")) and bool(s.get("shared_saves")), "running": n.running,
+                "name": n.state.name, "pairing_open": n.pairing_open(), "tracked": n.state.tracked,
+                "peers": [{"id": i, "name": p["name"]} for i, p in n.state.peers.items()]}
+
+    async def set_lan(self, on: bool) -> dict:
+        s = _settings()
+        s["lan_sync"] = on
+        _save_settings(s)
+        n = _lan()
+        try:
+            n.start() if on and s.get("shared_saves") else n.stop()
+        except OSError as e:
+            decky.logger.exception("lan start failed")
+            return {"ok": False, "error": str(e)}
+        return {"ok": True}
+
+    async def lan_set_name(self, name: str) -> None:
+        n = _lan()
+        n.state.name = name.strip() or n.state.name
+        n.state.save()
+
+    async def lan_pair_code(self) -> dict:
+        n = _lan()
+        if not n.running:
+            return {"ok": False, "error": "Turn on LAN sync first"}
+        return {"ok": True, "code": n.start_pairing(), "seconds": lan.PAIR_TTL}
+
+    async def lan_scan(self) -> list[dict]:
+        n = _lan()
+        return await asyncio.get_event_loop().run_in_executor(None, n.discover)
+
+    async def lan_pair(self, host: str, port: int, code: str) -> dict:
+        n = _lan()
+        try:
+            r = await asyncio.get_event_loop().run_in_executor(None, n.pair_with, host, port, code)
+            return {"ok": True, **r}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    async def lan_unpair(self, peer_id: str) -> None:
+        _lan().unpair(peer_id)
+
+    async def lan_folders(self, peer_id: str) -> dict:
+        """Folders here and on the peer, merged: where each one is, and which look like game saves."""
+        n = _lan()
+        def run():
+            rows = {c["entry"]: {**c, "where": "here"} for c in (lan.candidates(n.root) if n.root.is_dir() else [])}
+            error = ""
+            if peer_id:
+                try:
+                    for c in n.remote_candidates(peer_id):
+                        if c["entry"] in rows:
+                            rows[c["entry"]]["where"] = "both"
+                        else:
+                            rows[c["entry"]] = {**c, "where": "there"}
+                except Exception as e:
+                    error = f"Could not reach the other device: {e}"
+            for entry in n.state.tracked:
+                rows.setdefault(entry, {"entry": entry, "files": 0, "size": 0, "mtime": 0, "likely": False, "where": "none"})
+            return {"folders": sorted(rows.values(), key=lambda c: (not c["likely"], c["entry"].lower())),
+                    "tracked": n.state.tracked, "error": error}
+        return await asyncio.get_event_loop().run_in_executor(None, run)
+
+    async def lan_set_tracked(self, entries: list[str]) -> dict:
+        try:
+            return {"ok": True, "tracked": _lan().set_tracked(entries)}
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+
+    async def lan_sync(self, peer_id: str, mode: str) -> dict:
+        n = _lan()
+        def run():
+            try:
+                return {"ok": True, **n.sync(peer_id, mode)}
+            except Exception as e:
+                decky.logger.exception("lan sync failed")
+                return {"ok": False, "error": str(e)}
+        return await asyncio.get_event_loop().run_in_executor(None, run)
+
     async def _main(self):
         decky.logger.info("SteamKit loaded")
         asyncio.get_event_loop().run_in_executor(None, self._link_all)
+        s = _settings()
+        if s.get("lan_sync") and s.get("shared_saves"):
+            try:
+                _lan().start()
+            except OSError:
+                decky.logger.exception("lan start failed")
 
     async def _unload(self):
-        pass
+        if _node:
+            _node.stop()
 
     async def _uninstall(self):
         pass

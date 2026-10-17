@@ -1,9 +1,10 @@
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
 
-from . import mounts, registry, scanner, steam
+from . import lan, mounts, registry, saves, scanner, steam
 
 
 def ask(prompt: str, default: str = "") -> str:
@@ -125,6 +126,117 @@ def cmd_remove(args):
     print(f"Removed {len(chosen)} game(s). Game files were not touched.")
 
 
+def _lan_node(args) -> "lan.Node":
+    base = Path(os.environ.get("XDG_DATA_HOME") or "~/.local/share").expanduser() / "steamkit"
+    parent = Path(args.saves_parent).expanduser()
+    return lan.Node(base / "lan.json", parent, http_port=args.port, discovery_port=args.discovery_port)
+
+
+def _lan_peer(node, args) -> str:
+    """Scan the network, then let the user pick a paired device (or pass --peer NAME)."""
+    found = node.discover(hosts=tuple(args.host or ()))
+    paired = [p for p in found if p["paired"]]
+    if args.peer:
+        paired = [p for p in paired if args.peer.lower() in p["name"].lower()]
+    if not paired:
+        sys.exit("No paired device found. Run `steamkit lan pair` on both devices first.")
+    if len(paired) == 1:
+        return paired[0]["id"]
+    for i, p in enumerate(paired):
+        print(f"  {i}) {p['name']} ({p['host']})")
+    return paired[int(ask("Device", "0"))]["id"]
+
+
+def cmd_lan_serve(args):
+    node = _lan_node(args)
+    node.start()
+    print(f"Listening as '{node.state.name}' on port {node.http_port}. Ctrl+C to stop.", flush=True)
+    if args.pair:
+        print(f"Pairing code (valid {lan.PAIR_TTL // 60} minutes): {node.start_pairing()}", flush=True)
+    try:
+        while True:
+            time.sleep(1)
+    finally:
+        node.stop()
+
+
+def cmd_lan_scan(args):
+    node = _lan_node(args)
+    found = node.discover(hosts=tuple(args.host or ()))
+    if not found:
+        print("No SteamKit devices found. Run `steamkit lan serve` on the other device.")
+    for p in found:
+        print(f"  {p['name']:<24} {p['host']}:{p['port']}  {'paired' if p['paired'] else 'not paired'}")
+
+
+def cmd_lan_pair(args):
+    node = _lan_node(args)
+    if args.show_code:
+        node.start()
+        print(f"Enter this code on the other device (valid {lan.PAIR_TTL // 60} minutes): {node.start_pairing()}",
+              flush=True)
+        try:
+            while node.pairing_open():
+                time.sleep(1)
+        finally:
+            node.stop()
+        print("Paired." if node.state.peers else "Pairing closed.")
+        return
+    found = [p for p in node.discover(hosts=tuple(args.host or ())) if not p["paired"]]
+    if not found:
+        sys.exit("No unpaired device found. Run `steamkit lan pair --show-code` on the other device.")
+    for i, p in enumerate(found):
+        print(f"  {i}) {p['name']} ({p['host']})")
+    p = found[int(ask("Device", "0"))]
+    try:
+        r = node.pair_with(p["host"], p["port"], ask("Code shown on that device"))
+    except lan.PairingError as e:
+        sys.exit(f"Pairing failed: {e}")
+    print(f"Paired with {r['name']}.")
+
+
+def cmd_lan_track(args):
+    """Pick which save folders to keep in sync. Folders that look like game saves are marked with *.
+    Folders that only exist on a paired device are listed too, so a new device can start from theirs."""
+    node = _lan_node(args)
+    rows = {c["entry"]: {**c, "where": "here"} for c in (node.root.is_dir() and lan.candidates(node.root) or [])}
+    try:
+        peer = _lan_peer(node, args)
+        for c in node.remote_candidates(peer):
+            if c["entry"] in rows:
+                rows[c["entry"]]["where"] = "both"
+            else:
+                rows[c["entry"]] = {**c, "where": node.state.peers[peer]["name"]}
+    except SystemExit:
+        print("(No paired device reachable; listing this device's folders only.)")
+    cands = sorted(rows.values(), key=lambda c: (not c["likely"], c["entry"].lower()))
+    if not cands:
+        sys.exit("No save folders found here or on a paired device. Turn on shared saves and launch a game first.")
+    tracked = set(node.state.tracked)
+    for i, c in enumerate(cands):
+        print(f"  {i:3}) [{'x' if c['entry'] in tracked else ' '}] {'*' if c['likely'] else ' '} {c['entry']:<52} "
+              f"{c['files']:>4} files  {time.strftime('%Y-%m-%d', time.localtime(c['mtime']))}  {c['where']}")
+    print("  * = looks like a game's saves.")
+    chosen = parse_selection(ask("Folders to track (e.g. 0,2,5-9, all, none)", "none"), len(cands))
+    if ask("Replace the tracked list with this selection? (n = add to it) (y/n)", "n").lower() == "y":
+        tracked = set()
+    tracked |= {cands[i]["entry"] for i in chosen}
+    print(f"Tracking {len(node.set_tracked(sorted(tracked)))} folder(s).")
+
+
+def cmd_lan_sync(args):
+    node = _lan_node(args)
+    if not node.state.tracked:
+        sys.exit("Nothing tracked yet. Run `steamkit lan track`.")
+    peer = _lan_peer(node, args)
+    r = node.sync(peer, args.mode)
+    print(f"Pulled {r['pulled']}, pushed {r['pushed']} file(s); {r['overwritten']} replaced.")
+    if r["backup"]:
+        print(f"Backup before overwriting: {r['backup']}")
+    for c in r["conflicts"]:
+        print(f"  conflict (same time, different content, left alone): {c}")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="steamkit", description="Manage drives and non-Steam games")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -144,6 +256,25 @@ def main(argv=None):
 
     sub.add_parser("list", help="List games added by SteamKit").set_defaults(func=cmd_list)
     sub.add_parser("remove", help="Remove SteamKit-added games from Steam").set_defaults(func=cmd_remove)
+
+    l = sub.add_parser("lan", help="Sync save folders with other SteamKit devices on your network")
+    l.add_argument("--saves-parent", default="~", help="Folder containing SteamKitSaves")
+    l.add_argument("--port", type=int, default=lan.HTTP_PORT)
+    l.add_argument("--discovery-port", type=int, default=lan.DISCOVERY_PORT)
+    l.add_argument("--host", action="append", help="Extra address to look for a device (if broadcast is blocked)")
+    l.add_argument("--peer", help="Part of a paired device's name, to pick it without a prompt")
+    ls = l.add_subparsers(dest="lan_cmd", required=True)
+    x = ls.add_parser("serve", help="Make this device visible and available for syncing")
+    x.add_argument("--pair", action="store_true", help="Also open pairing and print a code")
+    x.set_defaults(func=cmd_lan_serve)
+    ls.add_parser("scan", help="List SteamKit devices on the network").set_defaults(func=cmd_lan_scan)
+    x = ls.add_parser("pair", help="Pair with another device (once)")
+    x.add_argument("--show-code", action="store_true", help="Show a code here instead of entering one")
+    x.set_defaults(func=cmd_lan_pair)
+    ls.add_parser("track", help="Choose which save folders to sync").set_defaults(func=cmd_lan_track)
+    x = ls.add_parser("sync", help="Sync tracked folders with a paired device")
+    x.add_argument("--mode", choices=lan.MODES, default="newest", help="pull, push, or newest file wins both ways")
+    x.set_defaults(func=cmd_lan_sync)
 
     args = p.parse_args(argv)
     try:

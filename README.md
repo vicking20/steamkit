@@ -10,6 +10,7 @@ Decky plugin for SteamOS and CachyOS Gaming Mode. Add Windows games to Steam in 
 - Artwork and icons from SteamGridDB. Searches by folder name, then exe name. Manual search if nothing matches.
 - Remove games added by SteamKit. Game files are not touched.
 - Shared saves (optional): every game saves to one folder, in Gaming Mode and on desktop. Backup and restore.
+- LAN sync (optional): find other SteamKit devices on your network and sync the save folders you pick.
 
 ## Install
 
@@ -41,6 +42,34 @@ Existing saves are moved in, never overwritten. If two games have the same file,
 Backups go to `~/SteamKitSaves/Backups`. Restoring backs up the current saves first.
 
 Not covered: games that save to the registry. Games that save in their install folder keep their saves there.
+
+## LAN sync
+
+Needs shared saves on. Off by default. Syncs save folders between your devices (for example a Steam Deck and a GPD Win 4) over the local network.
+
+1. Turn on **LAN sync** on both devices.
+2. On one, choose **Show pairing code**. On the other, choose **Find devices**, pick the first one and enter the code. This is done once.
+3. Choose **Sync with …**. Folders that look like game saves are listed first. Tick the ones to sync. Folders that only exist on the other device are listed too, so a new device can start from theirs. The selection is remembered.
+4. Pick a direction: newest file wins both ways, get from the other device, or send to it.
+
+Rules:
+
+- Files are never deleted by a sync.
+- If a file differs on both sides, the newer one wins. Same time but different content is left alone and reported.
+- A backup of `~/SteamKitSaves` is taken before any file is overwritten, on the receiving device too.
+- Sync is refused while a game is running.
+- Symlinks are not followed. Only folders inside the shared saves folder can be synced.
+
+Security: devices must be paired. Requests are signed with a key made at pairing, but file contents are not encrypted. Use it on a network you trust. Ports: UDP 47621 (discovery) and TCP 47622. If a firewall is on, allow them. If **Find devices** shows nothing (some routers block broadcast), use the CLI with `--host <ip>`.
+
+From the CLI:
+
+```bash
+python3 -m steamkit lan serve --pair      # make this device visible, print a pairing code
+python3 -m steamkit lan pair              # on the other device: enter the code
+python3 -m steamkit lan track             # choose folders
+python3 -m steamkit lan sync --mode newest
+```
 
 ## Notes
 

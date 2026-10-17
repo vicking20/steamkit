@@ -47,6 +47,25 @@ type LinkResult = {
   running?: number;
   notes?: string[];
 };
+type LanInfo = {
+  enabled: boolean;
+  running: boolean;
+  name: string;
+  pairing_open: boolean;
+  tracked: string[];
+  peers: { id: string; name: string }[];
+};
+type LanPeer = { id: string; name: string; host: string; port: number; paired: boolean };
+type LanFolder = { entry: string; files: number; size: number; mtime: number; likely: boolean; where: "here" | "there" | "both" | "none" };
+type LanSyncResult = {
+  ok: boolean;
+  error?: string;
+  pulled?: number;
+  pushed?: number;
+  overwritten?: number;
+  conflicts?: string[];
+  backup?: string | null;
+};
 type Drive = {
   name: string;
   uuid: string;
@@ -107,9 +126,21 @@ const backupSaves = callable<[], { ok: boolean; name?: string; size?: number; er
 const restoreSaves = callable<[string], { ok: boolean; safety?: string; error?: string }>("restore_saves");
 const setSavesParent = callable<[string], { ok: boolean; root?: string; error?: string }>("set_saves_parent");
 
+const lanInfo = callable<[], LanInfo>("lan_info");
+const setLan = callable<[boolean], { ok: boolean; error?: string }>("set_lan");
+const lanSetName = callable<[string], void>("lan_set_name");
+const lanPairCode = callable<[], { ok: boolean; code?: string; seconds?: number; error?: string }>("lan_pair_code");
+const lanScan = callable<[], LanPeer[]>("lan_scan");
+const lanPair = callable<[string, number, string], { ok: boolean; name?: string; error?: string }>("lan_pair");
+const lanUnpair = callable<[string], void>("lan_unpair");
+const lanFolders = callable<[string], { folders: LanFolder[]; tracked: string[]; error: string }>("lan_folders");
+const lanSetTracked = callable<[string[]], { ok: boolean; error?: string }>("lan_set_tracked");
+const lanSync = callable<[string, string], LanSyncResult>("lan_sync");
+
 const ADD_ROUTE = "/steamkit/add";
 const MANAGE_ROUTE = "/steamkit/manage";
 const RESTORE_ROUTE = "/steamkit/restore";
+const SYNC_ROUTE = "/steamkit/sync";
 const fmtSize = (b: number) => (b > 1 << 20 ? `${(b / (1 << 20)).toFixed(1)} MB` : `${Math.ceil(b / 1024)} KB`);
 
 function summarizeLink(r: LinkResult): string {
@@ -694,6 +725,267 @@ function SavesSection({ settings, reload }: { settings: Settings | null; reload:
   );
 }
 
+let syncTarget: { id: string; name: string } = { id: "", name: "" };
+
+function SyncPage() {
+  const [folders, setFolders] = useState<LanFolder[]>([]);
+  const [tracked, setTracked] = useState<Set<string>>(new Set());
+  const [error, setError] = useState("");
+  const [mode, setMode] = useState("newest");
+  const [busy, setBusy] = useState("");
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    lanFolders(syncTarget.id).then((r) => {
+      setFolders(r.folders);
+      setTracked(new Set(r.tracked));
+      setError(r.error);
+      setLoaded(true);
+    });
+  }, []);
+
+  const toggle = (entry: string, on: boolean) =>
+    setTracked((t) => {
+      const next = new Set(t);
+      on ? next.add(entry) : next.delete(entry);
+      return next;
+    });
+
+  const save = async () => {
+    const r = await lanSetTracked([...tracked]);
+    if (!r.ok) toaster.toast({ title: "SteamKit", body: `Failed: ${r.error}` });
+    return r.ok;
+  };
+
+  const sync = async () => {
+    if (!(await save())) return;
+    setBusy("Syncing…");
+    try {
+      const r = await lanSync(syncTarget.id, mode);
+      const body = r.ok
+        ? `Pulled ${r.pulled}, pushed ${r.pushed}${r.conflicts?.length ? `, ${r.conflicts.length} conflict(s) left alone` : ""}`
+        : `Failed: ${r.error}`;
+      toaster.toast({ title: "SteamKit", body });
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const likely = folders.filter((f) => f.likely);
+  const other = folders.filter((f) => !f.likely);
+  const row = (f: LanFolder) => (
+    <PanelSectionRow key={f.entry}>
+      <ToggleField
+        label={f.entry}
+        description={`${f.where === "there" ? `Only on ${syncTarget.name}` : f.where === "here" ? "Only here" : f.where === "both" ? "On both" : "Not found"} · ${f.files} files · ${fmtSize(f.size)}`}
+        checked={tracked.has(f.entry)}
+        onChange={(v) => toggle(f.entry, v)}
+      />
+    </PanelSectionRow>
+  );
+
+  return (
+    <div style={{ marginTop: 40, height: "calc(100% - 40px)", overflowY: "scroll", padding: "0 24px 80px" }}>
+      <PanelSection title={`Sync with ${syncTarget.name}`}>
+        {error && (
+          <PanelSectionRow>
+            <Field label={error} />
+          </PanelSectionRow>
+        )}
+        <PanelSectionRow>
+          <DropdownItem
+            label="Direction"
+            rgOptions={[
+              { data: "newest", label: "Newest file wins, both ways" },
+              { data: "pull", label: `Get from ${syncTarget.name}` },
+              { data: "push", label: `Send to ${syncTarget.name}` },
+            ]}
+            selectedOption={mode}
+            onChange={(o) => setMode(o.data)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem layout="below" disabled={!!busy || tracked.size === 0} onClick={sync}>
+            {busy || `Sync ${tracked.size} folder${tracked.size === 1 ? "" : "s"}`}
+          </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem layout="below" disabled={!!busy} onClick={save}>
+            Save selection only
+          </ButtonItem>
+        </PanelSectionRow>
+      </PanelSection>
+      {loaded && folders.length === 0 && (
+        <PanelSection>
+          <PanelSectionRow>
+            <Field label="No save folders yet. Launch a game with shared saves on." />
+          </PanelSectionRow>
+        </PanelSection>
+      )}
+      {likely.length > 0 && <PanelSection title="Look like game saves">{likely.map(row)}</PanelSection>}
+      {other.length > 0 && <PanelSection title="Other folders">{other.map(row)}</PanelSection>}
+    </div>
+  );
+}
+
+function LanSection({ settings }: { settings: Settings | null }) {
+  const [info, setInfo] = useState<LanInfo | null>(null);
+  const [found, setFound] = useState<LanPeer[]>([]);
+  const [scanning, setScanning] = useState(false);
+  const refresh = () => lanInfo().then(setInfo);
+  useEffect(() => {
+    refresh();
+  }, [settings?.shared_saves]);
+
+  const canUse = !!settings?.shared_saves;
+  const enabled = !!info?.enabled;
+
+  const toggle = async (on: boolean) => {
+    const r = await setLan(on);
+    if (!r.ok) toaster.toast({ title: "SteamKit", body: `Failed: ${r.error}` });
+    refresh();
+  };
+
+  const find = async () => {
+    setScanning(true);
+    try {
+      setFound(await lanScan());
+      refresh();
+    } finally {
+      setScanning(false);
+    }
+  };
+
+  const showCode = async () => {
+    const r = await lanPairCode();
+    if (!r.ok) return toaster.toast({ title: "SteamKit", body: r.error ?? "Failed" });
+    showModal(
+      <ConfirmModal
+        strTitle="Pairing code"
+        strDescription={`Enter ${r.code} on the other device within ${Math.round((r.seconds ?? 120) / 60)} minutes.`}
+        strOKButtonText="Done"
+        bAlertDialog
+      />,
+    );
+  };
+
+  const pair = (p: LanPeer) => {
+    let code = "";
+    showModal(
+      <ConfirmModal
+        strTitle={`Pair with ${p.name}`}
+        strDescription="On that device choose “Show pairing code”, then enter the 6 digits."
+        strOKButtonText="Pair"
+        onOK={async () => {
+          const r = await lanPair(p.host, p.port, code);
+          toaster.toast({ title: "SteamKit", body: r.ok ? `Paired with ${r.name}` : `Failed: ${r.error}` });
+          find();
+        }}
+      >
+        <TextField label="Code" onChange={(e) => (code = e.target.value)} />
+      </ConfirmModal>,
+    );
+  };
+
+  const open = (p: { id: string; name: string }) => {
+    syncTarget = { id: p.id, name: p.name };
+    Navigation.CloseSideMenus();
+    Navigation.Navigate(SYNC_ROUTE);
+  };
+
+  const rename = () => {
+    let name = info?.name ?? "";
+    showModal(
+      <ConfirmModal
+        strTitle="This device's name"
+        onOK={async () => {
+          await lanSetName(name);
+          refresh();
+        }}
+      >
+        <TextField label="Name" defaultValue={name} onChange={(e) => (name = e.target.value)} />
+      </ConfirmModal>,
+    );
+  };
+
+  const reachable = new Set(found.filter((p) => p.paired).map((p) => p.id));
+  return (
+    <PanelSection title="Sync with other devices">
+      <PanelSectionRow>
+        <ToggleField
+          label="LAN sync"
+          description={canUse ? (enabled ? "Visible to devices on this network" : "Off") : "Turn on shared saves first"}
+          checked={enabled}
+          disabled={!canUse}
+          onChange={toggle}
+        />
+      </PanelSectionRow>
+      {enabled && (
+        <>
+          <PanelSectionRow>
+            <ButtonItem layout="below" description={info?.name} onClick={rename}>
+              Device name
+            </ButtonItem>
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <ButtonItem layout="below" onClick={showCode}>
+              Show pairing code
+            </ButtonItem>
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <ButtonItem layout="below" disabled={scanning} onClick={find}>
+              {scanning ? "Looking…" : "Find devices"}
+            </ButtonItem>
+          </PanelSectionRow>
+          {found
+            .filter((p) => !p.paired)
+            .map((p) => (
+              <PanelSectionRow key={p.id}>
+                <ButtonItem layout="below" description={p.host} onClick={() => pair(p)}>
+                  Pair with {p.name}
+                </ButtonItem>
+              </PanelSectionRow>
+            ))}
+          {info?.peers.map((p) => (
+            <PanelSectionRow key={p.id}>
+              <ButtonItem
+                layout="below"
+                description={reachable.has(p.id) ? "Paired · online" : "Paired · press Find devices"}
+                disabled={!reachable.has(p.id)}
+                onClick={() => open(p)}
+              >
+                Sync with {p.name}
+              </ButtonItem>
+            </PanelSectionRow>
+          ))}
+          {info?.peers.map((p) => (
+            <PanelSectionRow key={`un-${p.id}`}>
+              <ButtonItem
+                layout="below"
+                onClick={() =>
+                  showModal(
+                    <ConfirmModal
+                      strTitle={`Forget ${p.name}?`}
+                      strDescription="You will need to pair again. Saves are not touched."
+                      strOKButtonText="Forget"
+                      onOK={async () => {
+                        await lanUnpair(p.id);
+                        refresh();
+                      }}
+                    />,
+                  )
+                }
+              >
+                Forget {p.name}
+              </ButtonItem>
+            </PanelSectionRow>
+          ))}
+        </>
+      )}
+    </PanelSection>
+  );
+}
+
 function DrivesSection() {
   const [drives, setDrives] = useState<Drive[]>([]);
   const refresh = () => listDrives().then(setDrives);
@@ -834,6 +1126,7 @@ function Content() {
         </PanelSectionRow>
       </PanelSection>
       <SavesSection settings={settings} reload={() => getSettings().then(setSettings)} />
+      <LanSection settings={settings} />
       <DrivesSection />
       <PanelSection title="Settings">
         {!settings?.gaming_mode && (
@@ -863,6 +1156,7 @@ export default definePlugin(() => {
   routerHook.addRoute(ADD_ROUTE, AddGamesPage);
   routerHook.addRoute(MANAGE_ROUTE, ManagePage);
   routerHook.addRoute(RESTORE_ROUTE, RestorePage);
+  routerHook.addRoute(SYNC_ROUTE, SyncPage);
   return {
     name: "SteamKit",
     titleView: <div className={staticClasses.Title}>SteamKit</div>,
@@ -872,6 +1166,7 @@ export default definePlugin(() => {
       routerHook.removeRoute(ADD_ROUTE);
       routerHook.removeRoute(MANAGE_ROUTE);
       routerHook.removeRoute(RESTORE_ROUTE);
+      routerHook.removeRoute(SYNC_ROUTE);
     },
   };
 });
