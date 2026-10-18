@@ -43,6 +43,18 @@ Backups go to `~/SteamKitSaves/Backups`. Restoring backs up the current saves fi
 
 Not covered: games that save to the registry. Games that save in their install folder keep their saves there.
 
+## Importing saves from another PC
+
+Games read saves from the shared saves folder, not from your real `~/Documents`. Copy saves from a Windows PC with **Import a game's save folder…** (or **Import a whole Documents folder…**) in the Saves section, or:
+
+```bash
+python3 -m steamkit saves import ~/Documents/NFSTR --dry-run   # preview
+python3 -m steamkit saves import ~/Documents/NFSTR
+python3 -m steamkit saves import /path/to/WindowsDocuments --contents
+```
+
+Newer files replace older ones after a backup. Nothing is deleted. A game's folder only gets linked after its first launch, so a new game is linked within about 30 seconds of closing it; import or sync its saves before the second launch.
+
 ## LAN sync
 
 Needs shared saves on. Off by default. Syncs save folders between your devices (for example a Steam Deck and a GPD Win 4) over the local network.

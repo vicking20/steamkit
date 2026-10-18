@@ -218,8 +218,8 @@ class TestLan(unittest.TestCase):
         self.lan, self.saves = lan, saves
         self.tmp = TemporaryDirectory()
         t = Path(self.tmp.name)
-        self.a = lan.Node(t / "a.json", t / "A", http_port=47701, discovery_port=47711)
-        self.b = lan.Node(t / "b.json", t / "B", http_port=47702, discovery_port=47712)
+        self.a = lan.Node(t / "a.json", t / "A", http_port=0, discovery_port=0)
+        self.b = lan.Node(t / "b.json", t / "B", http_port=0, discovery_port=0)
         for n in (self.a, self.b):
             n.root.mkdir(parents=True)
         self.a.start()
@@ -236,20 +236,20 @@ class TestLan(unittest.TestCase):
 
     def pair(self):
         code = self.a.start_pairing()
-        self.b.pair_with("127.0.0.1", 47701, code)
+        self.b.pair_with("127.0.0.1", self.a.http_port, code)
         return next(iter(self.b.state.peers))
 
     def test_pairing_rejects_wrong_code_and_locks_out(self):
         self.a.start_pairing()
         for _ in range(self.lan.PAIR_ATTEMPTS):
             with self.assertRaises(self.lan.PairingError):
-                self.b.pair_with("127.0.0.1", 47701, "000x00")
+                self.b.pair_with("127.0.0.1", self.a.http_port, "000x00")
         self.assertFalse(self.a.pairing_open())
         self.assertEqual(self.b.state.peers, {})
 
     def test_unpaired_requests_are_refused(self):
         with self.assertRaises(urllib.error.HTTPError) as cm:
-            urllib.request.urlopen("http://127.0.0.1:47701/candidates")
+            urllib.request.urlopen(f"http://127.0.0.1:{self.a.http_port}/candidates")
         self.assertEqual(cm.exception.code, 401)
 
     def test_pair_then_pull_and_newest(self):
@@ -315,7 +315,48 @@ class TestLan(unittest.TestCase):
                                "AppData/LocalLow/Studio": True})
 
     def test_discover_finds_running_peer(self):
-        self.b.discovery_port = 47711  # b queries a's discovery port
+        self.b.discovery_port = self.a.discovery_port  # b queries a's discovery port
         found = self.b.discover(timeout=1, hosts=("127.0.0.1",))
         self.assertEqual([p["id"] for p in found], [self.a.state.id])
-        self.assertEqual(found[0]["port"], 47701)
+        self.assertEqual(found[0]["port"], self.a.http_port)
+
+
+class TestImport(unittest.TestCase):
+    def setUp(self):
+        from steamkit import saves
+        self.saves = saves
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.parent = Path(self.tmp.name) / "home"
+        self.src = Path(self.tmp.name) / "win" / "NFSTR"
+        (self.src / "settings").mkdir(parents=True)
+        (self.parent / "SteamKitSaves/Saves/Documents/NFSTR/settings").mkdir(parents=True)
+
+    def w(self, p, text, mtime):
+        p.write_text(text)
+        os.utime(p, (mtime, mtime))
+
+    def test_newer_replaces_after_backup_and_older_is_kept(self):
+        dst = self.parent / "SteamKitSaves/Saves/Documents/NFSTR/settings"
+        self.w(self.src / "settings/a", "new", 2000)
+        self.w(dst / "a", "old", 1000)
+        self.w(self.src / "settings/b", "stale", 500)
+        self.w(dst / "b", "mine", 1000)
+        self.w(self.src / "settings/c", "fresh", 1000)
+        r = self.saves.import_tree(self.parent, self.src)
+        self.assertEqual((r["new"], r["replaced"], r["kept_newer"]), (["settings/c"], ["settings/a"], ["settings/b"]))
+        self.assertEqual((dst / "a").read_text(), "new")
+        self.assertEqual((dst / "b").read_text(), "mine")
+        self.assertEqual((dst / "c").read_text(), "fresh")
+        self.assertTrue(r["backup"])
+
+    def test_dry_run_changes_nothing_and_contents_merges(self):
+        self.w(self.src / "settings/a", "x", 2000)
+        r = self.saves.import_tree(self.parent, self.src, contents=True, dry_run=True)
+        self.assertTrue(r["dest"].endswith("Saves/Documents"))
+        self.assertEqual(r["new"], ["settings/a"])
+        self.assertFalse((self.parent / "SteamKitSaves/Saves/Documents/settings").exists())
+
+    def test_refuses_the_saves_folder_itself(self):
+        with self.assertRaises(ValueError):
+            self.saves.import_tree(self.parent, self.parent / "SteamKitSaves/Saves/Documents")

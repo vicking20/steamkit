@@ -262,10 +262,12 @@ class Node:
             return
         self._httpd = ThreadingHTTPServer(("", self.http_port), _make_handler(self))
         self._httpd.daemon_threads = True
+        self.http_port = self._httpd.server_address[1]  # differs from the request only for port 0 (tests)
         threading.Thread(target=self._httpd.serve_forever, daemon=True).start()
         udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         udp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         udp.bind(("", self.discovery_port))
+        self.discovery_port = udp.getsockname()[1]
         self._udp = udp
         threading.Thread(target=self._answer_discovery, args=(udp,), daemon=True).start()
 

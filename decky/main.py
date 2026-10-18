@@ -384,6 +384,23 @@ class Plugin:
                           "linked": exists and saves.is_linked(p["drive_c"], parent)})
         return {"root": str(saves.root_dir(parent)), "games": games, "backups": saves.list_backups(parent)}
 
+    async def import_saves(self, path: str, contents: bool) -> dict:
+        """Copy saves from a folder (e.g. a Windows PC's Documents) into the shared saves folder."""
+        if _prefixes_in_use():
+            return {"ok": False, "error": "Close running games first"}
+        def run():
+            parent = _saves_parent()
+            saves.saves_dir(parent).mkdir(parents=True, exist_ok=True)
+            r = saves.import_tree(parent, Path(path), "Documents", contents, owner=_user_ids())
+            _chown(saves.root_dir(parent), saves.backups_dir(parent))
+            return {"ok": True, "new": len(r["new"]), "replaced": len(r["replaced"]),
+                    "same": len(r["same"]), "kept": len(r["kept_newer"]), "backup": r["backup"], "dest": r["dest"]}
+        try:
+            return await asyncio.get_event_loop().run_in_executor(None, run)
+        except Exception as e:
+            decky.logger.exception("import failed")
+            return {"ok": False, "error": str(e)}
+
     async def link_saves(self) -> dict:
         return await asyncio.get_event_loop().run_in_executor(None, self._link_all)
 
@@ -515,9 +532,20 @@ class Plugin:
                 return {"ok": False, "error": str(e)}
         return await asyncio.get_event_loop().run_in_executor(None, run)
 
+    async def _relink_loop(self):
+        """A game's prefix only exists after its first launch, so link new ones as soon as they appear
+        (games that are running are skipped and picked up after they exit)."""
+        while True:
+            await asyncio.sleep(30)
+            try:
+                await asyncio.get_event_loop().run_in_executor(None, self._link_all)
+            except Exception:
+                decky.logger.exception("periodic link failed")
+
     async def _main(self):
         decky.logger.info("SteamKit loaded")
         asyncio.get_event_loop().run_in_executor(None, self._link_all)
+        self._relink_task = asyncio.get_event_loop().create_task(self._relink_loop())
         s = _settings()
         if s.get("lan_sync") and s.get("shared_saves"):
             try:
@@ -526,6 +554,9 @@ class Plugin:
                 decky.logger.exception("lan start failed")
 
     async def _unload(self):
+        task = getattr(self, "_relink_task", None)
+        if task:
+            task.cancel()
         if _node:
             _node.stop()
 

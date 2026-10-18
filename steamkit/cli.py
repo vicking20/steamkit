@@ -237,6 +237,21 @@ def cmd_lan_sync(args):
         print(f"  conflict (same time, different content, left alone): {c}")
 
 
+def cmd_saves_import(args):
+    parent = Path(args.saves_parent).expanduser()
+    r = saves.import_tree(parent, Path(args.source), args.into, args.contents, args.dry_run)
+    tag = "[dry-run] would " if args.dry_run else ""
+    print(f"{tag}import into {r['dest']}: {len(r['new'])} new, {len(r['replaced'])} replaced (newer), "
+          f"{len(r['same'])} identical, {len(r['kept_newer'])} kept (existing is newer or same age)")
+    for label in ("new", "replaced", "kept_newer"):
+        for rel in r[label][:15]:
+            print(f"   {label:<10} {rel}")
+        if len(r[label]) > 15:
+            print(f"   {label:<10} … and {len(r[label]) - 15} more")
+    if r["backup"]:
+        print(f"Backup before replacing: {r['backup']}")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="steamkit", description="Manage drives and non-Steam games")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -256,6 +271,17 @@ def main(argv=None):
 
     sub.add_parser("list", help="List games added by SteamKit").set_defaults(func=cmd_list)
     sub.add_parser("remove", help="Remove SteamKit-added games from Steam").set_defaults(func=cmd_remove)
+
+    sv = sub.add_parser("saves", help="Work with the shared saves folder")
+    sv.add_argument("--saves-parent", default="~", help="Folder containing SteamKitSaves")
+    svs = sv.add_subparsers(dest="saves_cmd", required=True)
+    x = svs.add_parser("import", help="Copy saves from a folder (e.g. from a Windows PC) into the shared saves")
+    x.add_argument("source", help="Folder to import, e.g. ~/Documents/NFSTR")
+    x.add_argument("--into", default="Documents", help="Saves subfolder: Documents, 'Saved Games', AppData/Roaming…")
+    x.add_argument("--contents", action="store_true", help="Merge the folder's contents instead of the folder itself "
+                   "(use for a whole Windows Documents folder)")
+    x.add_argument("--dry-run", action="store_true")
+    x.set_defaults(func=cmd_saves_import)
 
     l = sub.add_parser("lan", help="Sync save folders with other SteamKit devices on your network")
     l.add_argument("--saves-parent", default="~", help="Folder containing SteamKitSaves")

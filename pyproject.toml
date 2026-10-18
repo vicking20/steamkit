@@ -1,6 +1,6 @@
 [project]
 name = "steamkit"
-version = "0.2.0"
+version = "0.2.1"
 description = "Mount drives, bulk-add non-Steam games, and manage them on SteamOS/Linux"
 requires-python = ">=3.10"
 dependencies = []

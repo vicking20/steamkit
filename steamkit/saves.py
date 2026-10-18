@@ -173,3 +173,68 @@ def move_root(old_parent: Path, new_parent: Path) -> Path:
     if old.exists():
         shutil.move(str(old), str(new))
     return new
+
+
+def _sha(path: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def import_tree(parent: Path, src: Path, into: str = "Documents", contents: bool = False,
+                dry_run: bool = False, owner: tuple[int, int] | None = None) -> dict:
+    """Copy a folder of saves (e.g. from a Windows PC) into Saves/<into>. Never deletes anything.
+
+    By default the folder itself is copied (src/NFSTR -> Saves/Documents/NFSTR); with contents=True its
+    children are merged in instead (use for a whole Windows 'Documents' folder). Files that differ are
+    replaced only when the incoming one is newer, after a backup; otherwise the existing file is kept."""
+    src = Path(src).expanduser().resolve()
+    if into not in set(USER_FOLDERS.values()) | set(SHARED_FOLDERS.values()):
+        raise ValueError(f"unknown save folder: {into}")
+    if not src.is_dir():
+        raise FileNotFoundError(f"{src} is not a folder")
+    saves = saves_dir(parent)
+    if src == saves or saves in src.parents or src in saves.parents:
+        raise ValueError("pick a folder outside SteamKitSaves")
+    dest = saves / into if contents else saves / into / src.name
+    res = {"dest": str(dest), "new": [], "replaced": [], "same": [], "kept_newer": [], "backup": None}
+    todo = []
+    for dirpath, dirs, files in os.walk(src):
+        dirs[:] = [d for d in dirs if not (Path(dirpath) / d).is_symlink()]
+        for name in files:
+            f = Path(dirpath) / name
+            if f.is_symlink():
+                continue
+            rel = f.relative_to(src)
+            target = dest / rel
+            if not target.exists():
+                res["new"].append(rel.as_posix())
+            elif _sha(f) == _sha(target):
+                res["same"].append(rel.as_posix())
+                continue
+            elif f.stat().st_mtime > target.stat().st_mtime:
+                res["replaced"].append(rel.as_posix())
+            else:
+                res["kept_newer"].append(rel.as_posix())
+                continue
+            todo.append((f, target))
+    if dry_run or not todo:
+        return res
+    if res["replaced"]:
+        saves.mkdir(parents=True, exist_ok=True)
+        res["backup"] = backup(parent, "before-import").name
+    for f, target in todo:
+        created = []
+        p = target.parent
+        while not p.exists():
+            created.append(p)
+            p = p.parent
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(f, target)
+        if owner:
+            for c in [*created, target]:
+                os.lchown(c, *owner)
+    return res

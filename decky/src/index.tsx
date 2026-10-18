@@ -124,6 +124,10 @@ const savesInfo = callable<[], SavesInfo>("saves_info");
 const linkSaves = callable<[], LinkResult>("link_saves");
 const backupSaves = callable<[], { ok: boolean; name?: string; size?: number; error?: string }>("backup_saves");
 const restoreSaves = callable<[string], { ok: boolean; safety?: string; error?: string }>("restore_saves");
+const importSaves = callable<
+  [string, boolean],
+  { ok: boolean; error?: string; new?: number; replaced?: number; same?: number; kept?: number; backup?: string | null; dest?: string }
+>("import_saves");
 const setSavesParent = callable<[string], { ok: boolean; root?: string; error?: string }>("set_saves_parent");
 
 const lanInfo = callable<[], LanInfo>("lan_info");
@@ -647,7 +651,30 @@ function SavesSection({ settings, reload }: { settings: Settings | null; reload:
     );
   };
 
+  const importFolder = (contents: boolean) => async () => {
+    const res = await openFilePicker(FileSelectionType.FOLDER, settings?.last_dir ?? "/", false);
+    showModal(
+      <ConfirmModal
+        strTitle={contents ? "Import a Documents folder?" : "Import this game's save folder?"}
+        strDescription={`${res.realpath} → ${contents ? "the shared Documents folder" : "a folder of the same name in shared Documents"}. Newer files replace older ones after a backup. Nothing is deleted. Close running games first.`}
+        strOKButtonText="Import"
+        onOK={() =>
+          run("Importing…", async () => {
+            const r = await importSaves(res.realpath, contents);
+            toaster.toast({
+              title: "SteamKit",
+              body: r.ok
+                ? `${r.new} new, ${r.replaced} replaced, ${r.same} identical, ${r.kept} kept (existing newer)`
+                : `Failed: ${r.error}`,
+            });
+          })
+        }
+      />,
+    );
+  };
+
   const linkedCount = info?.games.filter((g) => g.linked).length ?? 0;
+  const waitingCount = info?.games.filter((g) => !g.exists).length ?? 0;
   const latest = info?.backups[0];
 
   return (
@@ -655,7 +682,11 @@ function SavesSection({ settings, reload }: { settings: Settings | null; reload:
       <PanelSectionRow>
         <ToggleField
           label="Shared saves"
-          description={enabled ? `${linkedCount}/${info?.games.length ?? 0} linked · ${info?.root ?? ""}` : "Off"}
+          description={
+            enabled
+              ? `${linkedCount} linked${waitingCount ? ` · ${waitingCount} not launched yet (linked after first run)` : ""} · ${info?.root ?? ""}`
+              : "Off"
+          }
           checked={enabled}
           onChange={enable}
         />
@@ -712,6 +743,16 @@ function SavesSection({ settings, reload }: { settings: Settings | null; reload:
               }}
             >
               Restore a backup…
+            </ButtonItem>
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <ButtonItem layout="below" disabled={!!busy} onClick={importFolder(false)}>
+              {busy === "Importing…" ? busy : "Import a game's save folder…"}
+            </ButtonItem>
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <ButtonItem layout="below" disabled={!!busy} onClick={importFolder(true)}>
+              Import a whole Documents folder…
             </ButtonItem>
           </PanelSectionRow>
           <PanelSectionRow>
