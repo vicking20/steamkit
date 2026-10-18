@@ -4,6 +4,7 @@ Devices find each other with a UDP broadcast, pair once with a 6-digit code, the
 files over HTTP signed with a shared key. Only folders the user tracks are synced, and files
 are never deleted.
 """
+import fnmatch
 import hashlib
 import hmac
 import json
@@ -34,6 +35,21 @@ TOP_FOLDERS = sorted(set(saves.USER_FOLDERS.values()) | set(saves.SHARED_FOLDERS
 # Wine/Windows folders that are never game saves.
 JUNK = saves.BACKUP_EXCLUDE | {"wine", "packages", "programs", "connecteddevicesplatform", "history", "fontcache",
                                "downloaded installations", "comms", "publishers", "placeholdertilelogofolder"}
+
+
+# File names that hold per-device settings (graphics, input, logs), not progress. Matched on the file name only:
+# some games keep real saves in a folder called "settings" (NFS The Run), so folder names are not used.
+SETTINGS_FILES = ("config*", "*.ini", "*.cfg", "*.conf", "*.config", "settings*", "*graphic*", "*video*",
+                  "options*", "*.log", "*.dmp", "*.tmp")
+# Folders that only ever hold caches, logs or screenshots.
+SKIP_DIRS = {"cache", "logs", "crashdumps", "shadercache", "screenshots", "pics"}
+
+
+def is_settings_file(rel: str) -> bool:
+    parts = PurePosixPath(rel).parts
+    if any(p.lower() in SKIP_DIRS for p in parts[:-1]):
+        return True
+    return any(fnmatch.fnmatchcase(parts[-1].lower(), pat) for pat in SETTINGS_FILES)
 
 
 # --- paths and manifests -------------------------------------------------------------------------
@@ -199,6 +215,7 @@ class State:
         self.name = data.get("name") or socket.gethostname()
         self.peers: dict[str, dict] = data.get("peers", {})   # id -> {name, key, host, port}
         self.tracked: list[str] = data.get("tracked", [])
+        self.skip_settings: bool = data.get("skip_settings", True)  # keep graphics/config files per device
         self.save()
 
     def save(self) -> None:
@@ -206,7 +223,8 @@ class State:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(json.dumps({"id": self.id, "name": self.name, "peers": self.peers,
-                                       "tracked": self.tracked}, indent=2))
+                                       "tracked": self.tracked,
+                                       "skip_settings": self.skip_settings}, indent=2))
             os.chmod(tmp, 0o600)  # holds pairing keys
             tmp.replace(self.path)
 
@@ -416,10 +434,15 @@ class Node:
             raise ValueError(f"mode must be one of {MODES}")
         if self.busy and self.busy():
             raise RuntimeError("Close running games before syncing")
-        report = {"pulled": 0, "pushed": 0, "overwritten": 0, "conflicts": [], "entries": {}, "backup": None}
+        report = {"pulled": 0, "pushed": 0, "overwritten": 0, "conflicts": [], "entries": {}, "backup": None, "skipped": 0}
         for entry in entries if entries is not None else list(self.state.tracked):
             local = manifest(self.root, entry)
             remote = self.remote_manifest(peer_id, entry)
+            if self.state.skip_settings:
+                kept_l = {k: v for k, v in local.items() if not is_settings_file(k)}
+                kept_r = {k: v for k, v in remote.items() if not is_settings_file(k)}
+                report["skipped"] += len(set(local) - set(kept_l) | set(remote) - set(kept_r))
+                local, remote = kept_l, kept_r
             p = plan(local, remote, mode)
             if p["overwrite"] and not report["backup"]:
                 self.root.mkdir(parents=True, exist_ok=True)

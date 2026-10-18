@@ -53,7 +53,7 @@ python3 -m steamkit saves import ~/Documents/NFSTR
 python3 -m steamkit saves import /path/to/WindowsDocuments --contents
 ```
 
-Newer files replace older ones after a backup. Nothing is deleted. A game's folder only gets linked after its first launch, so a new game is linked within about 30 seconds of closing it; import or sync its saves before the second launch.
+Pick the folder that sits directly under Documents (for example `Criterion Games`, not the game folder inside it), so the path stays the same as on Windows. Config, ini and graphics files are left out so a PC's resolution doesn't land on a handheld (`--include-settings` brings them in). Newer files replace older ones after a backup. Nothing is deleted. A game's folder only gets linked after its first launch, so a new game is linked within about 30 seconds of closing it; import or sync its saves before the second launch.
 
 ## LAN sync
 
@@ -67,6 +67,7 @@ Needs shared saves on. Off by default. Syncs save folders between your devices (
 Rules:
 
 - Files are never deleted by a sync.
+- Settings files (config, ini, cfg, graphics, video, options, logs) and cache/screenshot folders are not synced by default, so each device keeps its own resolution. Turn this off on the sync page if you want them.
 - If a file differs on both sides, the newer one wins. Same time but different content is left alone and reported.
 - A backup of `~/SteamKitSaves` is taken before any file is overwritten, on the receiving device too.
 - Sync is refused while a game is running.

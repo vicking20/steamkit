@@ -228,9 +228,13 @@ def cmd_lan_sync(args):
     node = _lan_node(args)
     if not node.state.tracked:
         sys.exit("Nothing tracked yet. Run `steamkit lan track`.")
+    if args.include_settings != (not node.state.skip_settings):
+        node.state.skip_settings = not args.include_settings
+        node.state.save()
     peer = _lan_peer(node, args)
     r = node.sync(peer, args.mode)
-    print(f"Pulled {r['pulled']}, pushed {r['pushed']} file(s); {r['overwritten']} replaced.")
+    print(f"Pulled {r['pulled']}, pushed {r['pushed']} file(s); {r['overwritten']} replaced; "
+          f"{r['skipped']} settings file(s) left alone.")
     if r["backup"]:
         print(f"Backup before overwriting: {r['backup']}")
     for c in r["conflicts"]:
@@ -239,10 +243,12 @@ def cmd_lan_sync(args):
 
 def cmd_saves_import(args):
     parent = Path(args.saves_parent).expanduser()
-    r = saves.import_tree(parent, Path(args.source), args.into, args.contents, args.dry_run)
+    r = saves.import_tree(parent, Path(args.source), args.into, args.contents, args.dry_run,
+                          skip=None if args.include_settings else lan.is_settings_file)
     tag = "[dry-run] would " if args.dry_run else ""
     print(f"{tag}import into {r['dest']}: {len(r['new'])} new, {len(r['replaced'])} replaced (newer), "
-          f"{len(r['same'])} identical, {len(r['kept_newer'])} kept (existing is newer or same age)")
+          f"{len(r['same'])} identical, {len(r['kept_newer'])} kept (existing is newer or same age), "
+          f"{len(r['skipped'])} settings files left out")
     for label in ("new", "replaced", "kept_newer"):
         for rel in r[label][:15]:
             print(f"   {label:<10} {rel}")
@@ -281,6 +287,7 @@ def main(argv=None):
     x.add_argument("--contents", action="store_true", help="Merge the folder's contents instead of the folder itself "
                    "(use for a whole Windows Documents folder)")
     x.add_argument("--dry-run", action="store_true")
+    x.add_argument("--include-settings", action="store_true", help="Also import config/ini/graphics files")
     x.set_defaults(func=cmd_saves_import)
 
     l = sub.add_parser("lan", help="Sync save folders with other SteamKit devices on your network")
@@ -300,6 +307,8 @@ def main(argv=None):
     ls.add_parser("track", help="Choose which save folders to sync").set_defaults(func=cmd_lan_track)
     x = ls.add_parser("sync", help="Sync tracked folders with a paired device")
     x.add_argument("--mode", choices=lan.MODES, default="newest", help="pull, push, or newest file wins both ways")
+    x.add_argument("--include-settings", action="store_true",
+                   help="Also sync config/ini/graphics files (skipped by default; remembered)")
     x.set_defaults(func=cmd_lan_sync)
 
     args = p.parse_args(argv)

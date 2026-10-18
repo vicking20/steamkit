@@ -391,7 +391,8 @@ class Plugin:
         def run():
             parent = _saves_parent()
             saves.saves_dir(parent).mkdir(parents=True, exist_ok=True)
-            r = saves.import_tree(parent, Path(path), "Documents", contents, owner=_user_ids())
+            skip = lan.is_settings_file if _lan().state.skip_settings else None
+            r = saves.import_tree(parent, Path(path), "Documents", contents, owner=_user_ids(), skip=skip)
             _chown(saves.root_dir(parent), saves.backups_dir(parent))
             return {"ok": True, "new": len(r["new"]), "replaced": len(r["replaced"]),
                     "same": len(r["same"]), "kept": len(r["kept_newer"]), "backup": r["backup"], "dest": r["dest"]}
@@ -455,6 +456,7 @@ class Plugin:
         s = _settings()
         return {"enabled": bool(s.get("lan_sync")) and bool(s.get("shared_saves")), "running": n.running,
                 "name": n.state.name, "pairing_open": n.pairing_open(), "tracked": n.state.tracked,
+                "skip_settings": n.state.skip_settings,
                 "peers": [{"id": i, "name": p["name"]} for i, p in n.state.peers.items()]}
 
     async def set_lan(self, on: bool) -> dict:
@@ -472,6 +474,11 @@ class Plugin:
     async def lan_set_name(self, name: str) -> None:
         n = _lan()
         n.state.name = name.strip() or n.state.name
+        n.state.save()
+
+    async def lan_set_skip_settings(self, on: bool) -> None:
+        n = _lan()
+        n.state.skip_settings = on
         n.state.save()
 
     async def lan_pair_code(self) -> dict:

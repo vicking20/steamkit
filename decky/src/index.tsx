@@ -53,6 +53,7 @@ type LanInfo = {
   name: string;
   pairing_open: boolean;
   tracked: string[];
+  skip_settings: boolean;
   peers: { id: string; name: string }[];
 };
 type LanPeer = { id: string; name: string; host: string; port: number; paired: boolean };
@@ -65,6 +66,7 @@ type LanSyncResult = {
   overwritten?: number;
   conflicts?: string[];
   backup?: string | null;
+  skipped?: number;
 };
 type Drive = {
   name: string;
@@ -132,6 +134,7 @@ const setSavesParent = callable<[string], { ok: boolean; root?: string; error?: 
 
 const lanInfo = callable<[], LanInfo>("lan_info");
 const setLan = callable<[boolean], { ok: boolean; error?: string }>("set_lan");
+const lanSetSkipSettings = callable<[boolean], void>("lan_set_skip_settings");
 const lanSetName = callable<[string], void>("lan_set_name");
 const lanPairCode = callable<[], { ok: boolean; code?: string; seconds?: number; error?: string }>("lan_pair_code");
 const lanScan = callable<[], LanPeer[]>("lan_scan");
@@ -775,8 +778,10 @@ function SyncPage() {
   const [mode, setMode] = useState("newest");
   const [busy, setBusy] = useState("");
   const [loaded, setLoaded] = useState(false);
+  const [skipSettings, setSkipSettings] = useState(true);
 
   useEffect(() => {
+    lanInfo().then((i) => setSkipSettings(i.skip_settings));
     lanFolders(syncTarget.id).then((r) => {
       setFolders(r.folders);
       setTracked(new Set(r.tracked));
@@ -804,7 +809,7 @@ function SyncPage() {
     try {
       const r = await lanSync(syncTarget.id, mode);
       const body = r.ok
-        ? `Pulled ${r.pulled}, pushed ${r.pushed}${r.conflicts?.length ? `, ${r.conflicts.length} conflict(s) left alone` : ""}`
+        ? `Pulled ${r.pulled}, pushed ${r.pushed}${r.skipped ? `, ${r.skipped} settings files left alone` : ""}${r.conflicts?.length ? `, ${r.conflicts.length} conflict(s) left alone` : ""}`
         : `Failed: ${r.error}`;
       toaster.toast({ title: "SteamKit", body });
     } finally {
@@ -843,6 +848,17 @@ function SyncPage() {
             ]}
             selectedOption={mode}
             onChange={(o) => setMode(o.data)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ToggleField
+            label="Keep settings per device"
+            description="Don't sync config, ini and graphics files, so each device keeps its own resolution"
+            checked={skipSettings}
+            onChange={(v) => {
+              setSkipSettings(v);
+              lanSetSkipSettings(v);
+            }}
           />
         </PanelSectionRow>
         <PanelSectionRow>

@@ -269,6 +269,25 @@ class TestLan(unittest.TestCase):
             self.assertEqual((base / "only_b.sav").read_text(), "B only")
         self.assertEqual(self.b.sync(pid, "newest")["pulled"], 0)
 
+    def test_settings_files_stay_per_device(self):
+        game = "Documents/Criterion Games/NFS MW"
+        self.put(self.a, game + "/Save/0/MUD.29.NFS13Save", "progress", 2000)
+        self.put(self.a, game + "/config.NFS13Save", "1440p", 2000)
+        self.put(self.a, game + "/cache/x.bin", "junk", 2000)
+        self.put(self.b, game + "/config.NFS13Save", "800p", 1000)
+        r = self.b.sync(self.pair(), "newest", [game])
+        self.assertEqual((self.b.root / game / "Save/0/MUD.29.NFS13Save").read_text(), "progress")
+        self.assertEqual((self.b.root / game / "config.NFS13Save").read_text(), "800p")
+        self.assertFalse((self.b.root / game / "cache").exists())
+        self.assertEqual(r["skipped"], 2)
+
+    def test_settings_filter_matches_file_names_not_folders(self):
+        self.assertFalse(self.lan.is_settings_file("settings/PROF_SAVE_body"))
+        self.assertTrue(self.lan.is_settings_file("Config/GameUserSettings.ini"))
+        self.assertTrue(self.lan.is_settings_file("config.NFS13Save"))
+        self.assertTrue(self.lan.is_settings_file("Save/cache/a.sav"))
+        self.assertFalse(self.lan.is_settings_file("Save/0/slot1.sav"))
+
     def test_fresh_device_gets_missing_folders(self):
         self.put(self.a, "Documents/My Games/NFS/deep/p.sav", "x", 1000)
         self.assertFalse((self.b.root / "Documents").exists())
@@ -356,6 +375,13 @@ class TestImport(unittest.TestCase):
         self.assertTrue(r["dest"].endswith("Saves/Documents"))
         self.assertEqual(r["new"], ["settings/a"])
         self.assertFalse((self.parent / "SteamKitSaves/Saves/Documents/settings").exists())
+
+    def test_skip_leaves_settings_out(self):
+        from steamkit import lan
+        self.w(self.src / "settings/PROF_SAVE_body", "p", 2000)
+        self.w(self.src / "video.ini", "1440p", 2000)
+        r = self.saves.import_tree(self.parent, self.src, skip=lan.is_settings_file)
+        self.assertEqual((r["new"], r["skipped"]), (["settings/PROF_SAVE_body"], ["video.ini"]))
 
     def test_refuses_the_saves_folder_itself(self):
         with self.assertRaises(ValueError):

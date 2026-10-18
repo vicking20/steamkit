@@ -185,12 +185,13 @@ def _sha(path: Path) -> str:
 
 
 def import_tree(parent: Path, src: Path, into: str = "Documents", contents: bool = False,
-                dry_run: bool = False, owner: tuple[int, int] | None = None) -> dict:
+                dry_run: bool = False, owner: tuple[int, int] | None = None, skip=None) -> dict:
     """Copy a folder of saves (e.g. from a Windows PC) into Saves/<into>. Never deletes anything.
 
     By default the folder itself is copied (src/NFSTR -> Saves/Documents/NFSTR); with contents=True its
     children are merged in instead (use for a whole Windows 'Documents' folder). Files that differ are
-    replaced only when the incoming one is newer, after a backup; otherwise the existing file is kept."""
+    replaced only when the incoming one is newer, after a backup; otherwise the existing file is kept.
+    skip(rel_path) -> True leaves a file out (used to keep a PC's graphics settings off a handheld)."""
     src = Path(src).expanduser().resolve()
     if into not in set(USER_FOLDERS.values()) | set(SHARED_FOLDERS.values()):
         raise ValueError(f"unknown save folder: {into}")
@@ -200,7 +201,7 @@ def import_tree(parent: Path, src: Path, into: str = "Documents", contents: bool
     if src == saves or saves in src.parents or src in saves.parents:
         raise ValueError("pick a folder outside SteamKitSaves")
     dest = saves / into if contents else saves / into / src.name
-    res = {"dest": str(dest), "new": [], "replaced": [], "same": [], "kept_newer": [], "backup": None}
+    res = {"dest": str(dest), "new": [], "replaced": [], "same": [], "kept_newer": [], "skipped": [], "backup": None}
     todo = []
     for dirpath, dirs, files in os.walk(src):
         dirs[:] = [d for d in dirs if not (Path(dirpath) / d).is_symlink()]
@@ -209,6 +210,9 @@ def import_tree(parent: Path, src: Path, into: str = "Documents", contents: bool
             if f.is_symlink():
                 continue
             rel = f.relative_to(src)
+            if skip and skip(rel.as_posix()):
+                res["skipped"].append(rel.as_posix())
+                continue
             target = dest / rel
             if not target.exists():
                 res["new"].append(rel.as_posix())
